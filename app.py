@@ -1224,6 +1224,69 @@ def _ad_dashboard():
     else:
         st.info("データなし")
 
+    render_adset_drilldown(df_camp_summary, d_start_str, d_end_str)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_meta_adset_metrics(since, until):
+    """広告セット別の消化金額・LINE登録数(Meta結果)を期間指定で取得。"""
+    cfg = st.secrets["meta"]
+    rows = _meta_get(f"{cfg['ad_account_id']}/insights", {
+        "level": "adset",
+        "time_range": json.dumps({"since": since, "until": until}),
+        "fields": "campaign_name,adset_name,spend,actions", "limit": "500",
+    })
+    REG = "offsite_conversion.fb_pixel_complete_registration"
+    out = []
+    for x in rows:
+        reg = sum(int(float(a["value"])) for a in x.get("actions", [])
+                  if a.get("action_type") == REG)
+        out.append({"キャンペーン名": x.get("campaign_name", ""),
+                    "広告セット名": x.get("adset_name", ""),
+                    "消化予算": int(float(x.get("spend", 0))),
+                    "LINE登録数": reg})
+    if not out:
+        return pd.DataFrame(columns=["キャンペーン名", "広告セット名", "消化予算", "LINE登録数"])
+    return pd.DataFrame(out)
+
+
+def render_adset_drilldown(df_camp_summary, d_start_str, d_end_str):
+    st.divider()
+    st.subheader("🔍 キャンペーン → 広告セット 詳細")
+    camps = (df_camp_summary[df_camp_summary["消化予算"] > 0]
+             .sort_values("消化予算", ascending=False)["キャンペーン名"].tolist())
+    if not camps:
+        st.info("対象キャンペーンなし")
+        return
+    sel = st.selectbox("キャンペーンを選択", camps, key="adset_drill")
+    try:
+        adsets = fetch_meta_adset_metrics(d_start_str, d_end_str)
+    except Exception as e:
+        st.error(f"広告セットの取得に失敗: {e}")
+        return
+    sub = adsets[adsets["キャンペーン名"] == sel].copy()
+    if sub.empty:
+        st.info("この期間の広告セットデータがありません")
+        return
+    sub["CPA"] = sub.apply(
+        lambda r: int(r["消化予算"] / r["LINE登録数"]) if r["LINE登録数"] > 0 else 0, axis=1)
+    camp_row = df_camp_summary[df_camp_summary["キャンペーン名"] == sel]
+    camp_sales = int(camp_row["売上合計"].iloc[0]) if len(camp_row) else 0
+    total_reg = int(sub["LINE登録数"].sum())
+    sub["売上(按分推定)"] = sub["LINE登録数"].apply(
+        lambda r: int(camp_sales * r / total_reg) if total_reg > 0 else 0)
+    sub = sub.sort_values("消化予算", ascending=False)
+    c = st.columns(4)
+    c[0].metric("広告セット数", len(sub))
+    c[1].metric("消化予算", format_yen(int(sub["消化予算"].sum())))
+    c[2].metric("LINE登録数", total_reg)
+    c[3].metric("売上(キャンペーン計)", format_yen(camp_sales))
+    disp = sub[["広告セット名", "消化予算", "LINE登録数", "CPA", "売上(按分推定)"]].copy()
+    for col in ["消化予算", "CPA", "売上(按分推定)"]:
+        disp[col] = disp[col].apply(lambda v: format_yen(int(v)))
+    st.dataframe(disp, hide_index=True, use_container_width=True)
+    st.caption("※消化予算・LINE登録数・CPAは広告セット別のMeta実数。"
+               "売上は広告セット単位で直接計測できないため、キャンペーン売上をLINE登録数で按分した推定値です。")
 
 
 def render_campaign_status():
